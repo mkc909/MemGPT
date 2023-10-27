@@ -1,4 +1,8 @@
-DEFAULT_MEMGPT_MODEL = 'gpt-4'
+import os
+
+MEMGPT_DIR = os.path.join(os.path.expanduser("~"), ".memgpt")
+
+DEFAULT_MEMGPT_MODEL = "gpt-4"
 
 FIRST_MESSAGE_ATTEMPTS = 10
 
@@ -12,7 +16,7 @@ STARTUP_QUOTES = [
 INITIAL_BOOT_MESSAGE_SEND_MESSAGE_FIRST_MSG = STARTUP_QUOTES[2]
 
 # Constants to do with summarization / conversation length window
-MESSAGE_SUMMARY_WARNING_TOKENS = 7000 # the number of tokens consumed in a call before a system warning goes to the agent
+MESSAGE_SUMMARY_WARNING_TOKENS = 7000  # the number of tokens consumed in a call before a system warning goes to the agent
 MESSAGE_SUMMARY_WARNING_STR = f"Warning: the conversation history will soon reach its maximum length and be trimmed. Make sure to save any important information from the conversation to your memory before it is removed."
 
 # Default memory limits
@@ -21,8 +25,8 @@ CORE_MEMORY_HUMAN_CHAR_LIMIT = 2000
 
 MAX_PAUSE_HEARTBEATS = 360  # in min
 
-MESSAGE_CHATGPT_FUNCTION_MODEL = 'gpt-3.5-turbo'
-MESSAGE_CHATGPT_FUNCTION_SYSTEM_MESSAGE = 'You are a helpful assistant. Keep your responses short and concise.'
+MESSAGE_CHATGPT_FUNCTION_MODEL = "gpt-3.5-turbo"
+MESSAGE_CHATGPT_FUNCTION_SYSTEM_MESSAGE = "You are a helpful assistant. Keep your responses short and concise."
 
 #### Functions related
 
