@@ -2,29 +2,35 @@ from abc import ABC, abstractmethod
 import os
 import datetime
 import re
-import faiss
-import numpy as np
 from typing import Optional, List, Tuple
 
-from .constants import MESSAGE_SUMMARY_WARNING_TOKENS, MEMGPT_DIR
+from .constants import MESSAGE_SUMMARY_WARNING_FRAC, MEMGPT_DIR
 from .utils import cosine_similarity, get_local_time, printd, count_tokens
 from .prompts.gpt_summarize import SYSTEM as SUMMARY_PROMPT_SYSTEM
+from memgpt import utils
 from .openai_tools import (
-    acompletions_with_backoff as acreate,
-    async_get_embedding_with_backoff,
     get_embedding_with_backoff,
     completions_with_backoff as create,
 )
-
 from llama_index import (
     VectorStoreIndex,
+    EmptyIndex,
     get_response_synthesizer,
     load_index_from_storage,
     StorageContext,
+    Document,
 )
+from llama_index.node_parser import SimpleNodeParser
+from llama_index.node_parser import SimpleNodeParser
 from llama_index.retrievers import VectorIndexRetriever
 from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.indices.postprocessor import SimilarityPostprocessor
+
+from memgpt.embeddings import embedding_model
+from memgpt.config import MemGPTConfig
+
+from memgpt.embeddings import embedding_model
+from memgpt.config import MemGPTConfig
 
 
 class CoreMemory(object):
@@ -114,53 +120,26 @@ class CoreMemory(object):
 
 def summarize_messages(
     model,
+    context_window,
     message_sequence_to_summarize,
 ):
     """Summarize a message sequence using GPT"""
 
     summary_prompt = SUMMARY_PROMPT_SYSTEM
     summary_input = str(message_sequence_to_summarize)
-    summary_input_tkns = count_tokens(summary_input, model)
-    if summary_input_tkns > MESSAGE_SUMMARY_WARNING_TOKENS:
-        trunc_ratio = (MESSAGE_SUMMARY_WARNING_TOKENS / summary_input_tkns) * 0.8  # For good measure...
-        cutoff = int(len(message_sequence_to_summarize) * trunc_ratio)
-        summary_input = str([summarize_messages(model, message_sequence_to_summarize[:cutoff])] + message_sequence_to_summarize[cutoff:])
-    message_sequence = [
-        {"role": "system", "content": summary_prompt},
-        {"role": "user", "content": summary_input},
-    ]
-
-    response = create(
-        model=model,
-        messages=message_sequence,
-    )
-
-    printd(f"summarize_messages gpt reply: {response.choices[0]}")
-    reply = response.choices[0].message.content
-    return reply
-
-
-async def a_summarize_messages(
-    model,
-    message_sequence_to_summarize,
-):
-    """Summarize a message sequence using GPT"""
-
-    summary_prompt = SUMMARY_PROMPT_SYSTEM
-    summary_input = str(message_sequence_to_summarize)
-    summary_input_tkns = count_tokens(summary_input, model)
-    if summary_input_tkns > MESSAGE_SUMMARY_WARNING_TOKENS:
-        trunc_ratio = (MESSAGE_SUMMARY_WARNING_TOKENS / summary_input_tkns) * 0.8  # For good measure...
+    summary_input_tkns = count_tokens(summary_input)
+    if summary_input_tkns > MESSAGE_SUMMARY_WARNING_FRAC * context_window:
+        trunc_ratio = (MESSAGE_SUMMARY_WARNING_FRAC * context_window / summary_input_tkns) * 0.8  # For good measure...
         cutoff = int(len(message_sequence_to_summarize) * trunc_ratio)
         summary_input = str(
-            [await summarize_messages(model, message_sequence_to_summarize[:cutoff])] + message_sequence_to_summarize[cutoff:]
+            [summarize_messages(model, context_window, message_sequence_to_summarize[:cutoff])] + message_sequence_to_summarize[cutoff:]
         )
     message_sequence = [
         {"role": "system", "content": summary_prompt},
         {"role": "user", "content": summary_input},
     ]
 
-    response = await acreate(
+    response = create(
         model=model,
         messages=message_sequence,
     )
@@ -221,9 +200,7 @@ class DummyArchivalMemory(ArchivalMemory):
             memory_str = "\n".join([d["content"] for d in self._archive])
         return f"\n### ARCHIVAL MEMORY ###" + f"\n{memory_str}"
 
-    def insert(self, memory_string, embedding=None):
-        if embedding is not None:
-            raise ValueError("Basic text-based archival memory does not support embeddings")
+    def insert(self, memory_string):
         self._archive.append(
             {
                 # can eventually upgrade to adding semantic tags, etc
@@ -231,9 +208,6 @@ class DummyArchivalMemory(ArchivalMemory):
                 "content": memory_string,
             }
         )
-
-    async def a_insert(self, memory_string, embedding=None):
-        return self.insert(memory_string, embedding)
 
     def search(self, query_string, count=None, start=None):
         """Simple text-based search"""
@@ -254,9 +228,6 @@ class DummyArchivalMemory(ArchivalMemory):
             return matches[start:], len(matches)
         else:
             return matches, len(matches)
-
-    async def a_search(self, query_string, count=None, start=None):
-        return self.search(query_string, count=None, start=None)
 
 
 class DummyArchivalMemoryWithEmbeddings(DummyArchivalMemory):
@@ -283,19 +254,14 @@ class DummyArchivalMemoryWithEmbeddings(DummyArchivalMemory):
             }
         )
 
-    def insert(self, memory_string, embedding=None):
-        if embedding is None:
-            embedding = get_embedding_with_backoff(memory_string, model=self.embedding_model)
+    def insert(self, memory_string):
+        embedding = get_embedding_with_backoff(memory_string, model=self.embedding_model)
         return self._insert(memory_string, embedding)
 
-    async def a_insert(self, memory_string, embedding=None):
-        if embedding is None:
-            embedding = await async_get_embedding_with_backoff(memory_string, model=self.embedding_model)
-        return self._insert(memory_string, embedding)
-
-    def _search(self, query_embedding, query_string, count, start):
+    def search(self, query_string, count, start):
         """Simple embedding-based search (inefficient, no caching)"""
         # see: https://github.com/openai/openai-cookbook/blob/main/examples/Semantic_text_search_using_embeddings.ipynb
+        query_embedding = get_embedding_with_backoff(query_string, model=self.embedding_model)
 
         # query_embedding = get_embedding(query_string, model=self.embedding_model)
         # our wrapped version supports backoff/rate-limits
@@ -324,14 +290,6 @@ class DummyArchivalMemoryWithEmbeddings(DummyArchivalMemory):
         else:
             return matches, len(matches)
 
-    def search(self, query_string, count=None, start=None):
-        query_embedding = get_embedding_with_backoff(query_string, model=self.embedding_model)
-        return self._search(self, query_embedding, query_string, count, start)
-
-    async def a_search(self, query_string, count=None, start=None):
-        query_embedding = await async_get_embedding_with_backoff(query_string, model=self.embedding_model)
-        return await self._search(self, query_embedding, query_string, count, start)
-
 
 class DummyArchivalMemoryWithFaiss(DummyArchivalMemory):
     """Dummy in-memory version of an archival memory database, using a FAISS
@@ -347,6 +305,8 @@ class DummyArchivalMemoryWithFaiss(DummyArchivalMemory):
 
     def __init__(self, index=None, archival_memory_database=None, embedding_model="text-embedding-ada-002", k=100):
         if index is None:
+            import faiss
+
             self.index = faiss.IndexFlatL2(1536)  # openai embedding vector size.
         else:
             self.index = index
@@ -359,7 +319,12 @@ class DummyArchivalMemoryWithFaiss(DummyArchivalMemory):
     def __len__(self):
         return len(self._archive)
 
-    def _insert(self, memory_string, embedding):
+    def insert(self, memory_string):
+        import numpy as np
+
+        # Get the embedding
+        embedding = get_embedding_with_backoff(memory_string, model=self.embedding_model)
+
         print(f"Got an embedding, type {type(embedding)}, len {len(embedding)}")
 
         self._archive.append(
@@ -372,27 +337,18 @@ class DummyArchivalMemoryWithFaiss(DummyArchivalMemory):
         embedding = np.array([embedding]).astype("float32")
         self.index.add(embedding)
 
-    def insert(self, memory_string, embedding=None):
-        if embedding is None:
-            # Get the embedding
-            embedding = get_embedding_with_backoff(memory_string, model=self.embedding_model)
-        return self._insert(memory_string, embedding)
-
-    async def a_insert(self, memory_string, embedding=None):
-        if embedding is None:
-            # Get the embedding
-            embedding = async_get_embedding_with_backoff(memory_string, model=self.embedding_model)
-        return await self._insert(memory_string, embedding)
-
-    def _search(self, query_embedding, query_string, count=None, start=None):
+    def search(self, query_string, count=None, start=None):
         """Simple embedding-based search (inefficient, no caching)"""
         # see: https://github.com/openai/openai-cookbook/blob/main/examples/Semantic_text_search_using_embeddings.ipynb
 
         # query_embedding = get_embedding(query_string, model=self.embedding_model)
         # our wrapped version supports backoff/rate-limits
+        import numpy as np
+
         if query_string in self.embeddings_dict:
             search_result = self.search_results[query_string]
         else:
+            query_embedding = get_embedding_with_backoff(query_string, model=self.embedding_model)
             _, indices = self.index.search(np.array([np.array(query_embedding, dtype=np.float32)]), self.k)
             search_result = [self._archive[idx] if idx < len(self._archive) else "" for idx in indices[0]]
             self.embeddings_dict[query_string] = query_embedding
@@ -422,20 +378,6 @@ class DummyArchivalMemoryWithFaiss(DummyArchivalMemory):
         else:
             return matches, len(matches)
 
-    def search(self, query_string, count=None, start=None):
-        if query_string in self.embeddings_dict:
-            query_embedding = self.embeddings_dict[query_string]
-        else:
-            query_embedding = get_embedding_with_backoff(query_string, model=self.embedding_model)
-        return self._search(query_embedding, query_string, count, start)
-
-    async def a_search(self, query_string, count=None, start=None):
-        if query_string in self.embeddings_dict:
-            query_embedding = self.embeddings_dict[query_string]
-        else:
-            query_embedding = await async_get_embedding_with_backoff(query_string, model=self.embedding_model)
-        return self._search(query_embedding, query_string, count, start)
-
 
 class RecallMemory(ABC):
     @abstractmethod
@@ -443,15 +385,7 @@ class RecallMemory(ABC):
         pass
 
     @abstractmethod
-    async def a_text_search(self, query_string, count=None, start=None):
-        pass
-
-    @abstractmethod
     def date_search(self, query_string, count=None, start=None):
-        pass
-
-    @abstractmethod
-    async def a_date_search(self, query_string, count=None, start=None):
         pass
 
     @abstractmethod
@@ -505,7 +439,7 @@ class DummyRecallMemory(RecallMemory):
         )
         return f"\n### RECALL MEMORY ###" + f"\n{memory_str}"
 
-    async def insert(self, message):
+    def insert(self, message):
         raise NotImplementedError("This should be handled by the PersistenceManager, recall memory is just a search layer on top")
 
     def text_search(self, query_string, count=None, start=None):
@@ -530,15 +464,12 @@ class DummyRecallMemory(RecallMemory):
         else:
             return matches, len(matches)
 
-    async def a_text_search(self, query_string, count=None, start=None):
-        return self.text_search(query_string, count, start)
-
     def _validate_date_format(self, date_str):
         """Validate the given date string in the format 'YYYY-MM-DD'."""
         try:
             datetime.datetime.strptime(date_str, "%Y-%m-%d")
             return True
-        except ValueError:
+        except (ValueError, TypeError):
             return False
 
     def _extract_date_from_timestamp(self, timestamp):
@@ -575,9 +506,6 @@ class DummyRecallMemory(RecallMemory):
         else:
             return matches, len(matches)
 
-    def a_date_search(self, start_date, end_date, count=None, start=None):
-        return self.date_search(start_date, end_date, count, start)
-
 
 class DummyRecallMemoryWithEmbeddings(DummyRecallMemory):
     """Lazily manage embeddings by keeping a string->embed dict"""
@@ -588,7 +516,7 @@ class DummyRecallMemoryWithEmbeddings(DummyRecallMemory):
         self.embedding_model = "text-embedding-ada-002"
         self.only_use_preloaded_embeddings = False
 
-    def _text_search(self, embedding_getter_func, query_string, count, start):
+    def text_search(self, query_string, count, start):
         # in the dummy version, run an (inefficient) case-insensitive match search
         message_pool = [d for d in self._message_logs if d["message"]["role"] not in ["system", "function"]]
 
@@ -603,11 +531,11 @@ class DummyRecallMemoryWithEmbeddings(DummyRecallMemory):
                     message_pool_filtered.append(d)
             elif message_str not in self.embeddings:
                 printd(f"recall_memory.text_search -- '{message_str}' was not in embedding dict, computing now")
-                self.embeddings[message_str] = embedding_getter_func(message_str, model=self.embedding_model)
+                self.embeddings[message_str] = get_embedding_with_backoff(message_str, model=self.embedding_model)
                 message_pool_filtered.append(d)
 
         # our wrapped version supports backoff/rate-limits
-        query_embedding = embedding_getter_func(query_string, model=self.embedding_model)
+        query_embedding = get_embedding_with_backoff(query_string, model=self.embedding_model)
         similarity_scores = [cosine_similarity(self.embeddings[d["message"]["content"]], query_embedding) for d in message_pool_filtered]
 
         # Sort the archive based on similarity scores
@@ -633,46 +561,75 @@ class DummyRecallMemoryWithEmbeddings(DummyRecallMemory):
         else:
             return matches, len(matches)
 
-    def text_search(self, query_string, count=None, start=None):
-        return self._text_search(get_embedding_with_backoff, query_string, count, start)
-
-    async def a_text_search(self, query_string, count=None, start=None):
-        return await self._text_search(async_get_embedding_with_backoff, query_string, count, start)
-
 
 class LocalArchivalMemory(ArchivalMemory):
     """Archival memory built on top of Llama Index"""
 
-    def __init__(self, archival_memory_database: Optional[str] = None, top_k: Optional[int] = 100):
+    def __init__(self, agent_config, top_k: Optional[int] = 100):
         """Init function for archival memory
 
         :param archiva_memory_database: name of dataset to pre-fill archival with
         :type archival_memory_database: str
         """
 
-        if archival_memory_database is not None:
-            # TODO: load form ~/.memgpt/archival
-            directory = f"{MEMGPT_DIR}/archival/{archival_memory_database}"
-            assert os.path.exists(directory), f"Archival memory database {archival_memory_database} does not exist"
+        self.top_k = top_k
+        self.agent_config = agent_config
+
+        # locate saved index
+        # if self.agent_config.data_source is not None:  # connected data source
+        #    directory = f"{MEMGPT_DIR}/archival/{self.agent_config.data_source}"
+        #    assert os.path.exists(directory), f"Archival memory database {self.agent_config.data_source} does not exist"
+        # elif self.agent_config.name is not None:
+        if self.agent_config.name is not None:
+            directory = agent_config.save_agent_index_dir()
+            if not os.path.exists(directory):
+                # no existing archival storage
+                directory = None
+
+        # load/create index
+        if directory:
             storage_context = StorageContext.from_defaults(persist_dir=directory)
             self.index = load_index_from_storage(storage_context)
         else:
-            self.index = VectorIndex()
-        self.top_k = top_k
-        self.retriever = VectorIndexRetriever(
-            index=self.index,  # does this get refreshed?
-            similarity_top_k=self.top_k,
-        )
+            self.index = EmptyIndex()
+
+        # create retriever
+        if isinstance(self.index, EmptyIndex):
+            self.retriever = None  # cant create retriever over empty indes
+        else:
+            self.retriever = VectorIndexRetriever(
+                index=self.index,  # does this get refreshed?
+                similarity_top_k=self.top_k,
+            )
+
         # TODO: have some mechanism for cleanup otherwise will lead to OOM
         self.cache = {}
+
+    def save(self):
+        """Save the index to disk"""
+        # if self.agent_config.data_sources:  # update original archival index
+        #    # TODO: this corrupts the originally loaded data. do we want to do this?
+        #    utils.save_index(self.index, self.agent_config.data_sources)
+        # else:
+
+        # don't need to save data source, since we assume data source data is already loaded into the agent index
+        utils.save_agent_index(self.index, self.agent_config)
 
     def insert(self, memory_string):
         self.index.insert(memory_string)
 
-    async def a_insert(self, memory_string):
-        return self.insert(memory_string)
+        # TODO: figure out if this needs to be refreshed (probably not)
+        self.retriever = VectorIndexRetriever(
+            index=self.index,
+            similarity_top_k=self.top_k,
+        )
 
     def search(self, query_string, count=None, start=None):
+        print("searching with local")
+        if self.retriever is None:
+            print("Warning: archival memory is empty")
+            return [], 0
+
         start = start if start else 0
         count = count if count else self.top_k
         count = min(count + start, self.top_k)
@@ -685,10 +642,91 @@ class LocalArchivalMemory(ArchivalMemory):
         # from pprint import pprint
         # pprint(results)
         return results, len(results)
-    
-    async def a_search(self, query_string, count=None, start=None):
-        return self.search(query_string, count, start)
 
     def __repr__(self) -> str:
-        print(self.index.ref_doc_info)
-        return ""
+        if isinstance(self.index, EmptyIndex):
+            memory_str = "<empty>"
+        else:
+            memory_str = self.index.ref_doc_info
+        return f"\n### ARCHIVAL MEMORY ###" + f"\n{memory_str}"
+
+
+class EmbeddingArchivalMemory(ArchivalMemory):
+    """Archival memory with embedding based search"""
+
+    def __init__(self, agent_config, top_k: Optional[int] = 100):
+        """Init function for archival memory
+
+        :param archiva_memory_database: name of dataset to pre-fill archival with
+        :type archival_memory_database: str
+        """
+        from memgpt.connectors.storage import StorageConnector
+
+        self.top_k = top_k
+        self.agent_config = agent_config
+        config = MemGPTConfig.load()
+
+        # create embedding model
+        self.embed_model = embedding_model()
+        self.embedding_chunk_size = config.embedding_chunk_size
+
+        # create storage backend
+        self.storage = StorageConnector.get_storage_connector(agent_config=agent_config)
+        # TODO: have some mechanism for cleanup otherwise will lead to OOM
+        self.cache = {}
+
+    def save(self):
+        """Save the index to disk"""
+        self.storage.save()
+
+    def insert(self, memory_string):
+        """Embed and save memory string"""
+        from memgpt.connectors.storage import Passage
+
+        try:
+            passages = []
+
+            # create parser
+            parser = SimpleNodeParser.from_defaults(chunk_size=self.embedding_chunk_size)
+
+            # breakup string into passages
+            for node in parser.get_nodes_from_documents([Document(text=memory_string)]):
+                embedding = self.embed_model.get_text_embedding(node.text)
+                passages.append(Passage(text=node.text, embedding=embedding, doc_id=f"agent_{self.agent_config.name}_memory"))
+
+            # insert passages
+            self.storage.insert_many(passages)
+            return True
+        except Exception as e:
+            print("Archival insert error", e)
+            raise e
+
+    def search(self, query_string, count=None, start=None):
+        """Search query string"""
+        try:
+            if query_string not in self.cache:
+                # self.cache[query_string] = self.retriever.retrieve(query_string)
+                query_vec = self.embed_model.get_text_embedding(query_string)
+                self.cache[query_string] = self.storage.query(query_string, query_vec, top_k=self.top_k)
+
+            start = start if start else 0
+            count = count if count else self.top_k
+            end = min(count + start, len(self.cache[query_string]))
+
+            results = self.cache[query_string][start:end]
+            results = [{"timestamp": get_local_time(), "content": node.text} for node in results]
+            return results, len(results)
+        except Exception as e:
+            print("Archival search error", e)
+            raise e
+
+    def __repr__(self) -> str:
+        limit = 10
+        passages = []
+        for passage in list(self.storage.get_all(limit)):  # TODO: only get first 10
+            passages.append(str(passage.text))
+        memory_str = "\n".join(passages)
+        return f"\n### ARCHIVAL MEMORY ###" + f"\n{memory_str}"
+
+    def __len__(self):
+        return self.storage.size()

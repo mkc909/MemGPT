@@ -118,7 +118,7 @@ FUNCTIONS_CHAINING = {
                     "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
                 },
             },
-            "required": ["name", "page", "request_heartbeat"],
+            "required": ["query", "page", "request_heartbeat"],
         },
     },
     "conversation_search": {
@@ -140,7 +140,7 @@ FUNCTIONS_CHAINING = {
                     "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
                 },
             },
-            "required": ["name", "page", "request_heartbeat"],
+            "required": ["query", "page", "request_heartbeat"],
         },
     },
     "recall_memory_search_date": {
@@ -166,7 +166,7 @@ FUNCTIONS_CHAINING = {
                     "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
                 },
             },
-            "required": ["name", "page", "request_heartbeat"],
+            "required": ["start_date", "end_date", "page", "request_heartbeat"],
         },
     },
     "conversation_search_date": {
@@ -192,7 +192,7 @@ FUNCTIONS_CHAINING = {
                     "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
                 },
             },
-            "required": ["name", "page", "request_heartbeat"],
+            "required": ["start_date", "end_date", "page", "request_heartbeat"],
         },
     },
     "archival_memory_insert": {
@@ -210,7 +210,7 @@ FUNCTIONS_CHAINING = {
                     "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
                 },
             },
-            "required": ["name", "content", "request_heartbeat"],
+            "required": ["content", "request_heartbeat"],
         },
     },
     "archival_memory_search": {
@@ -232,7 +232,81 @@ FUNCTIONS_CHAINING = {
                     "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
                 },
             },
-            "required": ["name", "query", "page", "request_heartbeat"],
+            "required": ["query", "page", "request_heartbeat"],
+        },
+    },
+    "read_from_text_file": {
+        "name": "read_from_text_file",
+        "description": "Read lines from a text file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "The name of the file to read.",
+                },
+                "line_start": {
+                    "type": "integer",
+                    "description": "Line to start reading from.",
+                },
+                "num_lines": {
+                    "type": "integer",
+                    "description": "How many lines to read (defaults to 1).",
+                },
+                "request_heartbeat": {
+                    "type": "boolean",
+                    "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
+                },
+            },
+            "required": ["filename", "line_start", "request_heartbeat"],
+        },
+    },
+    "append_to_text_file": {
+        "name": "append_to_text_file",
+        "description": "Append to a text file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "The name of the file to read.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to append to the file.",
+                },
+                "request_heartbeat": {
+                    "type": "boolean",
+                    "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
+                },
+            },
+            "required": ["filename", "content", "request_heartbeat"],
+        },
+    },
+    "http_request": {
+        "name": "http_request",
+        "description": "Generates an HTTP request and returns the response.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "method": {
+                    "type": "string",
+                    "description": "The HTTP method (e.g., 'GET', 'POST').",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "The URL for the request",
+                },
+                "payload": {
+                    "type": "string",
+                    "description": "A JSON string representing the request payload.",
+                },
+                "request_heartbeat": {
+                    "type": "boolean",
+                    "description": FUNCTION_PARAM_DESCRIPTION_REQ_HEARTBEAT,
+                },
+            },
+            "required": ["method", "url", "request_heartbeat"],
         },
     },
 }

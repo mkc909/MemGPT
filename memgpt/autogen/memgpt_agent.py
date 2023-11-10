@@ -1,16 +1,18 @@
 from autogen.agentchat import Agent, ConversableAgent, UserProxyAgent, GroupChat, GroupChatManager
-from ..agent import AgentAsync
+from memgpt.agent import Agent as _Agent
 
-import asyncio
 from typing import Callable, Optional, List, Dict, Union, Any, Tuple
 
-from .interface import AutoGenInterface
-from ..persistence_manager import InMemoryStateManager
-from .. import system
-from .. import constants
-from .. import presets
-from ..personas import personas
-from ..humans import humans
+from memgpt.autogen.interface import AutoGenInterface
+from memgpt.persistence_manager import LocalStateManager
+import memgpt.system as system
+import memgpt.constants as constants
+import memgpt.presets as presets
+from memgpt.personas import personas
+from memgpt.humans import humans
+from memgpt.config import AgentConfig
+from memgpt.cli.cli import attach
+from memgpt.connectors.storage import StorageConnector
 
 
 def create_memgpt_autogen_agent_from_config(
@@ -23,8 +25,12 @@ def create_memgpt_autogen_agent_from_config(
     code_execution_config: Optional[Union[Dict, bool]] = None,
     llm_config: Optional[Union[Dict, bool]] = None,
     default_auto_reply: Optional[Union[str, Dict, None]] = "",
+    interface_kwargs: Dict = None,
 ):
     """Construct AutoGen config workflow in a clean way."""
+
+    if interface_kwargs is None:
+        interface_kwargs = {}
 
     model = constants.DEFAULT_MEMGPT_MODEL if llm_config is None else llm_config["config_list"][0]["model"]
     persona_desc = personas.DEFAULT if system_message == "" else system_message
@@ -40,21 +46,23 @@ def create_memgpt_autogen_agent_from_config(
 
     autogen_memgpt_agent = create_autogen_memgpt_agent(
         name,
-        preset=presets.DEFAULT,
+        preset=presets.DEFAULT_PRESET,
         model=model,
         persona_description=persona_desc,
         user_description=user_desc,
         is_termination_msg=is_termination_msg,
+        interface_kwargs=interface_kwargs,
     )
 
     if human_input_mode != "ALWAYS":
         coop_agent1 = create_autogen_memgpt_agent(
             name,
-            preset=presets.DEFAULT,
+            preset=presets.DEFAULT_PRESET,
             model=model,
             persona_description=persona_desc,
             user_description=user_desc,
             is_termination_msg=is_termination_msg,
+            interface_kwargs=interface_kwargs,
         )
         if default_auto_reply != "":
             coop_agent2 = UserProxyAgent(
@@ -65,17 +73,18 @@ def create_memgpt_autogen_agent_from_config(
         else:
             coop_agent2 = create_autogen_memgpt_agent(
                 name,
-                preset=presets.DEFAULT,
+                preset=presets.DEFAULT_PRESET,
                 model=model,
                 persona_description=persona_desc,
                 user_description=user_desc,
                 is_termination_msg=is_termination_msg,
+                interface_kwargs=interface_kwargs,
             )
 
         groupchat = GroupChat(
             agents=[autogen_memgpt_agent, coop_agent1, coop_agent2],
             messages=[],
-            max_round=12 if max_consecutive_auto_reply is None else max_consecutive_auto_reply
+            max_round=12 if max_consecutive_auto_reply is None else max_consecutive_auto_reply,
         )
         manager = GroupChatManager(name=name, groupchat=groupchat, llm_config=llm_config)
         return manager
@@ -86,14 +95,14 @@ def create_memgpt_autogen_agent_from_config(
 
 def create_autogen_memgpt_agent(
     autogen_name,
-    preset=presets.DEFAULT,
+    preset=presets.DEFAULT_PRESET,
     model=constants.DEFAULT_MEMGPT_MODEL,
     persona_description=personas.DEFAULT,
     user_description=humans.DEFAULT,
     interface=None,
     interface_kwargs={},
     persistence_manager=None,
-    persistence_manager_kwargs={},
+    persistence_manager_kwargs=None,
     is_termination_msg: Optional[Callable[[Dict], bool]] = None,
 ):
     """
@@ -109,11 +118,27 @@ def create_autogen_memgpt_agent(
     }
     ```
     """
+    agent_config = AgentConfig(
+        # name=autogen_name,
+        # TODO: more gracefully integrate reuse of MemGPT agents. Right now, we are creating a new MemGPT agent for
+        # every call to this function, because those scripts using create_autogen_memgpt_agent may contain calls
+        # to non-idempotent agent functions like `attach`.
+        persona=persona_description,
+        human=user_description,
+        model=model,
+        preset=presets.DEFAULT_PRESET,
+    )
+
     interface = AutoGenInterface(**interface_kwargs) if interface is None else interface
-    persistence_manager = InMemoryStateManager(**persistence_manager_kwargs) if persistence_manager is None else persistence_manager
+    if persistence_manager_kwargs is None:
+        persistence_manager_kwargs = {
+            "agent_config": agent_config,
+        }
+    persistence_manager = LocalStateManager(**persistence_manager_kwargs) if persistence_manager is None else persistence_manager
 
     memgpt_agent = presets.use_preset(
         preset,
+        agent_config,
         model,
         persona_description,
         user_description,
@@ -133,7 +158,7 @@ class MemGPTAgent(ConversableAgent):
     def __init__(
         self,
         name: str,
-        agent: AgentAsync,
+        agent: _Agent,
         skip_verify=False,
         concat_other_agent_messages=False,
         is_termination_msg: Optional[Callable[[Dict], bool]] = None,
@@ -142,13 +167,20 @@ class MemGPTAgent(ConversableAgent):
         self.agent = agent
         self.skip_verify = skip_verify
         self.concat_other_agent_messages = concat_other_agent_messages
-        self.register_reply([Agent, None], MemGPTAgent._a_generate_reply_for_user_message)
         self.register_reply([Agent, None], MemGPTAgent._generate_reply_for_user_message)
         self.messages_processed_up_to_idx = 0
 
-        self._is_termination_msg = (
-            is_termination_msg if is_termination_msg is not None else (lambda x: x == "TERMINATE")
-        )
+        self._is_termination_msg = is_termination_msg if is_termination_msg is not None else (lambda x: x == "TERMINATE")
+
+    def attach(self, data_source: str):
+        # attach new data
+        attach(self.agent.config.name, data_source)
+
+        # update agent config
+        self.agent.config.attach_data_source(data_source)
+
+        # reload agent with new data source
+        self.agent.persistence_manager.archival_memory.storage = StorageConnector.get_storage_connector(agent_config=self.agent.config)
 
     def format_other_agent_message(self, msg):
         if "name" in msg:
@@ -169,14 +201,6 @@ class MemGPTAgent(ConversableAgent):
         return entire_message_list[self.messages_processed_up_to_idx :]
 
     def _generate_reply_for_user_message(
-        self,
-        messages: Optional[List[Dict]] = None,
-        sender: Optional[Agent] = None,
-        config: Optional[Any] = None,
-    ) -> Tuple[bool, Union[str, Dict, None]]:
-        return asyncio.run(self._a_generate_reply_for_user_message(messages=messages, sender=sender, config=config))
-
-    async def _a_generate_reply_for_user_message(
         self,
         messages: Optional[List[Dict]] = None,
         sender: Optional[Agent] = None,
@@ -208,7 +232,7 @@ class MemGPTAgent(ConversableAgent):
                 heartbeat_request,
                 function_failed,
                 token_warning,
-            ) = await self.agent.step(user_message, first_message=False, skip_verify=self.skip_verify)
+            ) = self.agent.step(user_message, first_message=False, skip_verify=self.skip_verify)
             # Skip user inputs if there's a memory warning, function execution failed, or the agent asked for control
             if token_warning:
                 user_message = system.get_token_limit_warning()
@@ -220,7 +244,7 @@ class MemGPTAgent(ConversableAgent):
                 break
 
         # Stop the conversation
-        if self._is_termination_msg(new_messages[-1]['content']):
+        if self._is_termination_msg(new_messages[-1]["content"]):
             return True, None
 
         # Pass back to AutoGen the pretty-printed calls MemGPT made to the interface

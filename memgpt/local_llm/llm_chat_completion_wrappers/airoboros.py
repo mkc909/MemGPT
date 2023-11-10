@@ -1,6 +1,8 @@
 import json
 
 from .wrapper_base import LLMChatCompletionWrapper
+from ..json_parser import clean_json
+from ...errors import LLMJSONParsingError
 
 
 class Airoboros21Wrapper(LLMChatCompletionWrapper):
@@ -131,7 +133,7 @@ class Airoboros21Wrapper(LLMChatCompletionWrapper):
             elif message["role"] == "assistant":
                 prompt += f"\nASSISTANT: {message['content']}"
                 # need to add the function call if there was one
-                if message["function_call"]:
+                if "function_call" in message and message["function_call"]:
                     prompt += f"\n{create_function_call(message['function_call'])}"
             elif message["role"] == "function":
                 # TODO find a good way to add this
@@ -183,11 +185,14 @@ class Airoboros21Wrapper(LLMChatCompletionWrapper):
             raw_llm_output = "{" + raw_llm_output
 
         try:
-            function_json_output = json.loads(raw_llm_output)
+            function_json_output = clean_json(raw_llm_output)
         except Exception as e:
-            raise Exception(f"Failed to decode JSON from LLM output:\n{raw_llm_output}")
-        function_name = function_json_output["function"]
-        function_parameters = function_json_output["params"]
+            raise Exception(f"Failed to decode JSON from LLM output:\n{raw_llm_output} - error\n{str(e)}")
+        try:
+            function_name = function_json_output["function"]
+            function_parameters = function_json_output["params"]
+        except KeyError as e:
+            raise LLMJSONParsingError(f"Received valid JSON from LLM, but JSON was missing fields: {str(e)}")
 
         if self.clean_func_args:
             function_name, function_parameters = self.clean_function_args(function_name, function_parameters)
@@ -334,7 +339,7 @@ class Airoboros21InnerMonologueWrapper(Airoboros21Wrapper):
                 prompt += f"\nASSISTANT:"
                 # need to add the function call if there was one
                 inner_thoughts = message["content"]
-                if message["function_call"]:
+                if "function_call" in message and message["function_call"]:
                     prompt += f"\n{create_function_call(message['function_call'], inner_thoughts=inner_thoughts)}"
             elif message["role"] == "function":
                 # TODO find a good way to add this
@@ -389,14 +394,14 @@ class Airoboros21InnerMonologueWrapper(Airoboros21Wrapper):
             raw_llm_output = "{" + raw_llm_output
 
         try:
-            function_json_output = json.loads(raw_llm_output)
+            function_json_output = clean_json(raw_llm_output)
         except Exception as e:
-            try:
-                function_json_output = json.loads(raw_llm_output + "\n}")
-            except:
-                raise Exception(f"Failed to decode JSON from LLM output:\n{raw_llm_output}")
-        function_name = function_json_output["function"]
-        function_parameters = function_json_output["params"]
+            raise Exception(f"Failed to decode JSON from LLM output:\n{raw_llm_output} - error\n{str(e)}")
+        try:
+            function_name = function_json_output["function"]
+            function_parameters = function_json_output["params"]
+        except KeyError as e:
+            raise LLMJSONParsingError(f"Received valid JSON from LLM, but JSON was missing fields: {str(e)}")
 
         if self.clean_func_args:
             (
